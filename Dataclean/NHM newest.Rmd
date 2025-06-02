@@ -1,0 +1,792 @@
+---
+title: '2323'
+output: html_document
+date: "2025-05-13"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+*清空环境加载包*
+```{r}
+rm(list=ls())
+gc()
+
+
+td<-tempdir()
+dir.create(td,showWarnings = FALSE)
+
+list.of.packages<-c("dplyr","ggplot2","plyr","rlpi","data.table","terra","sf")
+
+new.packages <- list.of.packages[!(list.of.packages %in% installed.packages()[,"Package"])]
+if(length(new.packages)) install.packages(new.packages)
+
+lapply(list.of.packages,require,character.only=TRUE)
+rm(list.of.packages)
+```
+
+
+
+
+
+
+
+```{r}
+# 1. Load the LPD public data----
+Lpi_dat <- read.csv("C:/Users/zhy30/Desktop/第三学期毕业设计/我的毕业设计/LPIdata.csv")
+Lpi_dat[Lpi_dat == "NULL"] <- NA
+
+
+# Format the species names
+Lpi_dat$Binomial<-gsub(Lpi_dat$Binomial,pattern = "_",replacement = " ")
+
+# 1.2.b. Select only terrestrial vertebrate species----
+Lpi_dat <- Lpi_dat[Lpi_dat$Class %in% c("Aves","Reptilia","Mammalia","Amphibia"),]
+Lpi_dat <- Lpi_dat[!Lpi_dat$Order %in% c("Cetacea"),]
+
+# 2. Plot the populations time series----
+# 2.a Get the time-series data ----
+Time_series <- names(Lpi_dat)[grep(names(Lpi_dat),pattern = "X")]
+pop_stimates <- apply(Lpi_dat[,colnames(Lpi_dat)%in%Time_series],MARGIN =2,FUN=function(x) as.numeric(x))
+
+y_max<-pop_stimates[!is.na(pop_stimates)]%>% log() %>% max() ; y_min<-0
+
+# Built a basic blank plot
+time<-Time_series %>% gsub(pattern = "X",replacement = "") %>% as.numeric()
+pop<-seq(y_min,y_max,length.out=length(time))
+
+plot(y=pop,x=time,axes=F,type="n",ylab="Log Pop.Stimate",xlab="Years",xlim=c(1950,2020))
+axis(1)
+axis(2,las=2)
+
+# Color ramp
+pal1 <- colorRampPalette(c("navy","skyblue","gold","orange"))
+pal1 <-pal1(nrow(pop_stimates))
+
+# Plot time series
+for (k in 1:nrow(pop_stimates)){
+  
+  x<-pop_stimates[k,][!is.na(pop_stimates[k,])] %>% log()
+  y<-names(x) %>% gsub(pattern = "X",replacement = "") %>% as.numeric()  
+  
+  if(length(x)>30){
+    lines(y=x,x=y,col=pal1[k],lwd=1.1)  
+  }else{
+    next()
+  }
+}
+
+mtext(side=3,adj=0,"Very Messy Plot of Population Time Series on the LPI")
+
+# 2.b Plot the LPI populations ----
+# Get the global map information
+globMAP <- geodata::world(resolution = 2,level=0,path=td) %>% st_as_sf()
+
+plot(globMAP %>% st_geometry(),col="grey")
+Lpi_dat <- st_as_sf(Lpi_dat, coords = c("Longitude","Latitude"), crs = 4326)
+points(Lpi_dat,col="tomato")
+
+# 3. Get the number of records of the populations for the range of years ---- 
+# time-series records and consecutive values
+Records_populations<-function(x,startYear,lastYear){
+  
+  # We are going to use the ID from x to build the result dataset
+  dat_r<-data.frame(ID=x$ID,
+                    max_seq=rep(NA,nrow(x)),
+                    min_seq=rep(NA,nrow(x)),
+                    total_records=rep(NA,nrow(x)),
+                    first_year=rep(NA,nrow(x)),
+                    last_year=rep(NA,nrow(x)),
+                    Zero=rep(NA,nrow(x)))
+  
+  # Get the number the sequences
+  x[x=="NULL"]<-NA
+  
+  # Progress bar to the function
+  print("Getting records summary:")
+  progress_bar = txtProgressBar(min=0, max=nrow(x), style = 1, char="=")
+  
+  ids<-x$ID
+  x<-x[,colnames(x)%in%c(paste0("X",startYear:lastYear))]
+  
+  
+  for (j in 1:nrow(x)){
+    
+    seq_TimeSeries<-data.frame(lengths=rle(!is.na(x[j,paste0("X",startYear:lastYear)])%>%as.vector())$lengths,
+                               values=rle(!is.na(x[j,paste0("X",startYear:lastYear)])%>%as.vector())$values)# 
+    
+    seq_values<-which(!is.na(x[j,]))
+    
+    dat_r$first_year[j]<-colnames(x)[min(seq_values)] %>% gsub(pattern = "X",replacement = "") %>% as.numeric()
+    dat_r$last_year[j]<-colnames(x)[max(seq_values)] %>% gsub(pattern = "X",replacement = "") %>% as.numeric()
+    
+    
+    # dat_r$first_year[j]<-colnames(x)[min(which(!is.na(x[j,])))] %>% gsub(pattern = "X",replacement = "") %>% as.numeric()
+    # dat_r$last_year[j]<-colnames(x)[max(which(!is.na(x[j,])))] %>% gsub(pattern = "X",replacement = "") %>% as.numeric()
+    
+    dat_r$total_records[j]<-sum(!is.na(x[j,paste0("X",startYear:lastYear)]))
+    
+    dat_r$max_seq[j]<-max(seq_TimeSeries[seq_TimeSeries$values==TRUE,"lengths"])
+    dat_r$min_seq[j]<-min(seq_TimeSeries[seq_TimeSeries$values==TRUE,"lengths"])
+    
+    dat_r$Zero[j]<- c(TRUE %in% c(x[j,paste0("X",startYear:lastYear)]==0))
+    
+    dat_r$ID[j]<-ids[j]
+    
+    # Progress bar  
+    setTxtProgressBar(progress_bar, value = j)
+  }  
+  
+  close(progress_bar)
+  return(dat_r)  
+  
+}
+
+# 3.2.a Run the function to count the records for each population within our time-period----
+Records_Lpi<-Records_populations(x=Lpi_dat %>% st_drop_geometry(),startYear = 1950,lastYear = 2020) # Set the year
+
+head(Records_Lpi)
+tail(Records_Lpi)
+
+Records_Lpi[is.infinite(Records_Lpi$max_seq),]<-NA
+names(Records_Lpi)[4]
+
+names(Records_Lpi)[4]<-"Total_Natural_Records"
+
+# 3.3 Add the information to the data----
+Lpi_dat <- merge(Lpi_dat, Records_Lpi, by = "ID")
+
+selected_pop<-Lpi_dat[Lpi_dat$max_seq>=10,]
+
+# Number of unique species
+selected_pop$Binomial %>% unique() %>% length()
+
+# Number of populations
+nrow(selected_pop)
+
+# Add the points 
+points(selected_pop,col="darkblue")
+
+# 3.3.b Populations trends----
+Time_series <- names(selected_pop)[grep(names(Lpi_dat),pattern = "X")]
+pop_stimates <- apply(selected_pop[,colnames(selected_pop) %in% Time_series], MARGIN = 1, FUN = function(x) as.numeric(x))
+
+
+y_max<-pop_stimates[!is.na(pop_stimates)]%>% log() %>% max() ; y_min<-0
+
+# Built a basic blank plot
+time<-Time_series %>% gsub(pattern = "X",replacement = "") %>% as.numeric()
+pop<-seq(y_min,y_max,length.out=length(time))
+
+plot(y=pop,x=time,axes=F,type="n",ylab="Log Pop.Stimate",xlab="Years",xlim=c(1950,2020))
+axis(1)
+axis(2,las=2)
+
+# Color ramp
+pal1 <- colorRampPalette(c("navy","skyblue","gold","orange"))
+pal1 <-pal1(nrow(pop_stimates))
+```
+*检查一下，是否保留了时间序列数据*
+**随机找出一个population查看**
+```{r}
+grep("^X\\d{4}$", names(selected_pop), value = TRUE)
+selected_pop[1, grep("^X\\d{4}$", names(selected_pop))]
+
+```
+*下面进行分类，用lm函数进行线性回归，按照斜率分成三类数据*
+```{r}
+library(tidyverse)
+
+pop_long <- selected_pop %>%
+  st_drop_geometry() %>%
+  select(ID, Binomial, matches("^X\\d{4}$")) %>%
+  pivot_longer(cols = matches("^X\\d{4}$"),
+               names_to = "Year", values_to = "Population") %>%
+  mutate(
+    Year = as.numeric(gsub("X", "", Year)),
+    Population = as.numeric(Population)  # ← 关键修复点
+  ) %>%
+  filter(!is.na(Population))
+
+# 再次检查
+glimpse(pop_long)
+
+
+```
+*先把这8326组数提取出来，然后拟合8326个直线，储存他们的斜率（将斜率和id对应储存，然后再分组）*
+*查看三个组各自有多少个*
+```{r}
+# 获取唯一的 population ID 列表
+unique_ids <- unique(pop_long$ID)
+
+# 初始化结果列表
+results <- vector("list", length(unique_ids))
+
+# 遍历每个 ID
+for (i in seq_along(unique_ids)) {
+  id_val <- unique_ids[i]
+  
+  # 提取该 ID 的时间序列
+  pop_sub <- pop_long[pop_long$ID == id_val, ]
+  
+  # 尝试拟合线性模型
+  slope_val <- tryCatch({
+    model <- lm(Population ~ Year, data = pop_sub)
+    coef(model)[2]
+  }, error = function(e) NA)
+  
+  # 存入结果
+  results[[i]] <- data.frame(ID = id_val, slope = slope_val)
+  
+  # 可选：每 1000 个打印一次进度
+  if (i %% 1000 == 0) cat("Processed:", i, "\n")
+}
+
+# 合并所有结果为数据框
+slope_df <- do.call(rbind, results)
+
+# 加入 Trend 分类
+slope_df$Trend <- with(slope_df, ifelse(
+  is.na(slope), "Unknown",
+  ifelse(slope > 0.1, "Increasing",
+         ifelse(slope < -0.1, "Decreasing", "Fluctuating"))
+))
+
+# 查看统计结果
+table(slope_df$Trend)
+
+
+```
+**将 slope_df（包含每个 population 的 Trend 标签）合并回原始数据 selected_pop，就能为所有 population 打上标签，方便你后续筛选或建模使用。**
+```{r}
+# 将斜率结果（包含 ID 和 Trend）合并回 selected_pop
+selected_pop_labeled <- merge(selected_pop, slope_df[, c("ID", "slope", "Trend")], by = "ID")
+table(selected_pop_labeled$Trend)      # 看三类数量
+head(selected_pop_labeled[, c("ID", "Binomial", "slope", "Trend")])  # 预览前几行
+
+```
+
+```{r}
+library(sf)  # 确保 sf 在环境中
+
+# 设置颜色映射
+trend_colors <- c("Increasing" = "forestgreen", 
+                  "Fluctuating" = "purple", 
+                  "Decreasing" = "firebrick")
+
+# 提取时间序列列名和年份
+Time_series <- grep("^X\\d{4}$", names(selected_pop_labeled), value = TRUE)
+time <- as.numeric(gsub("X", "", Time_series))
+
+# 设置三图并排画
+par(mfrow = c(1, 3))
+
+# 遍历三类趋势
+for (trend_type in c("Increasing", "Fluctuating", "Decreasing")) {
+  
+  # 选出该类数据 + 去掉 geometry，防止列表错误
+  subset_data <- selected_pop_labeled[selected_pop_labeled$Trend == trend_type, ] %>%
+    st_drop_geometry()
+  
+  # 提取时间序列部分并转换为纯 numeric matrix
+  pop_matrix <- subset_data[, Time_series]
+  pop_matrix <- apply(pop_matrix, 2, as.numeric)  # 每列转 numeric
+  
+  # 设置 Y 轴范围
+  y_max <- max(log(pop_matrix[!is.na(pop_matrix)]), na.rm = TRUE)
+  y_min <- 0
+  
+  # 空图初始化
+  plot(x = time, y = seq(y_min, y_max, length.out = length(time)), 
+       axes = FALSE, type = "n", ylab = "Log(Pop.Estimate)", xlab = "Years",
+       main = paste0(trend_type, "\n(n = ", nrow(subset_data), ")"), 
+       col.main = trend_colors[trend_type])
+  
+  axis(1)
+  axis(2, las = 2)
+  
+  # 每一条线单独画
+  for (k in 1:nrow(pop_matrix)) {
+    x_vals <- pop_matrix[k, ]
+    valid_idx <- which(!is.na(x_vals))
+    if (length(valid_idx) > 10) {
+      lines(x = time[valid_idx], y = log(x_vals[valid_idx]), 
+            col = trend_colors[trend_type], lwd = 1)
+    }
+  }
+}
+
+```
+*将三种趋势的点绘制在世界底图上*
+```{r}
+# 设置颜色映射
+trend_colors <- c("Increasing" = "forestgreen", 
+                  "Fluctuating" = "purple", 
+                  "Decreasing" = "firebrick")
+
+# 绘制地图底图
+plot(globMAP %>% st_geometry(), col = "grey", main = "different Population Trends on World Map（over 10 years）")
+
+# 遍历三类趋势，分层绘制
+for (trend_type in names(trend_colors)) {
+  
+  # 子集数据
+  pts <- selected_pop_labeled[selected_pop_labeled$Trend == trend_type, ]
+  
+  # 添加点
+  points(pts, col = trend_colors[trend_type], pch = 16, cex = 0.6)
+}
+
+# 添加图例
+legend("bottomleft", legend = names(trend_colors),
+       col = trend_colors, pch = 16, title = "Trend", bty = "n")
+
+```
+```{r}
+# 设置三张图布局
+par(mfrow = c(1, 3), mar = c(3, 3, 5, 1))  # 顶部留空间给标题
+
+# 遍历三类趋势
+for (trend_type in names(trend_colors)) {
+  
+  # 取出对应趋势的点
+  pts <- selected_pop_labeled[selected_pop_labeled$Trend == trend_type, ]
+  
+  # 绘制地图底图
+  plot(globMAP %>% st_geometry(), col = "grey", 
+       main = paste0(trend_type, "\n(n = ", nrow(pts), ")"), 
+       cex.main = 1.5)
+  
+  # 添加点（sf对象自动读取geometry）
+  points(pts, col = trend_colors[trend_type], pch = 16, cex = 0.6)
+}
+```
+
+
+**下面开始剪裁CRU气候数据（温度）**
+*先读取数据（nc.gz)*
+```{r}
+# ---- Step 1: 加载气候数据和物种坐标（geometry） ----
+
+# 加载必要的包
+library(terra)
+library(sf)
+
+# 设置气候数据路径（请改成你自己的）
+cru_path <- "C:/Users/zhy30/Desktop/第三学期毕业设计/我的毕业设计/CRU温度数据/cru_ts4.09.1901.2024.tmp.dat (1).nc/cru_ts4.09.1901.2024.tmp.dat.nc"
+
+# 读取气候数据（多层 NetCDF 栅格，每层代表一个时间点）
+cru_tmp <- terra::rast(cru_path)
+
+# selected_pop 已是 sf 对象，geometry 列已内嵌经纬度坐标
+# 直接转换为 SpatVector 用于 terra 提取
+# 第一步：重新构建 population_id（用行号来对应 selected_pop 的 ID）
+
+
+pop_vect <- terra::vect(selected_pop)
+
+
+```
+**然后我们检查一下气候数据的数据格式，发现他并没有以年份命名，每一行有5952个数据说明是5952个月份的数据**
+```{r}
+# ==== 查看 CRU 数据结构 ====
+
+# 1. 查看栅格本体基本信息
+print(cru_tmp)  # 图层数、空间范围、分辨率、投影
+
+# 2. 图层名称（如 tmp_1, tmp_2, ...）
+layer_names <- names(cru_tmp)
+cat("前10个图层名称：\n")
+print(layer_names[1:10])
+tail(names(cru_tmp), 10)
+
+# 3. 提取图层对应的时间戳
+time_vals <- terra::time(cru_tmp)
+
+cat("\n图层总数（应为5952）：", length(time_vals), "\n")
+cat("起始时间戳：", head(time_vals, 3), "\n")
+cat("结束时间戳：", tail(time_vals, 3), "\n")
+
+# 4. 可视化前4个栅格图层（可跳过）
+plot(cru_tmp[[1:4]])  # 可视化前4个月气温分布
+
+# 将时间戳保存以备后续使用
+time_vals[1:5]  # 可打印或 return 出来以供我查看
+
+```
+**there are 5952 layers in! and we found 1488layers are tmp, there are 4 variables in **
+```{r}
+library(terra)
+
+# 设置路径（你已完成）
+cru_tmp <- terra::rast(cru_path)
+
+# 提取前 1488 个 tmp 层（每层是一个时间点）
+cru_tmp_only <- cru_tmp[[1:1488]]
+
+# 获取时间戳（1488个）
+tmp_time_vals <- terra::time(cru_tmp_only)
+
+# 将 sf 对象转为 SpatVector
+pop_vect <- terra::vect(selected_pop)
+
+# 进行空间提取
+tmp_values <- terra::extract(cru_tmp_only, pop_vect)
+
+# 替换掉 ID，使用 selected_pop$ID
+tmp_values$population_id <- selected_pop$ID
+
+# 可选验证：确保一一对应
+head(cbind(selected_pop$ID, tmp_values$population_id))
+
+```
+```{r}
+
+library(dplyr)
+library(tidyr)
+library(purrr)
+library(progress)
+
+# 初始化进度条
+pb <- progress_bar$new(total = nrow(tmp_values), format = "转换中 [:bar] :percent ETA: :eta")
+
+# 构建长表格
+temperature_long <- map_dfr(1:nrow(tmp_values), function(i) {
+  pb$tick()
+  tibble(
+    population_id = tmp_values$population_id[i],
+    date = tmp_time_vals,
+    temperature = as.numeric(tmp_values[i, 2:(1 + length(tmp_time_vals))])  # 从第2列开始是温度
+  )
+})
+
+
+```
+**test 12389088 =1488(8326)**
+```{r}
+head(temperature_long)
+tail(temperature_long)
+str(temperature_long)
+length(unique(temperature_long$population_id))  # 是否等于 nrow(selected_pop)
+
+```
+**now for every population location we have 1488 tmps for each years, calculate the mean tmps **
+```{r}
+
+
+detach("package:plyr", unload = TRUE)
+library(dplyr)
+
+# 创建年份向量（长度为 124 × 8326）
+years <- rep(1901:2024, times = length(unique(temperature_long$population_id)))
+
+# 添加行号辅助变量
+temperature_long <- temperature_long %>%
+  group_by(population_id) %>%
+  mutate(year_index = ceiling(row_number() / 12)) %>%  # 每12行为一年
+  ungroup()
+
+# 聚合每12行的年平均温度
+temperature_long_average <- temperature_long %>%
+  group_by(population_id, year_index) %>%
+  summarise(mean_temperature = mean(temperature, na.rm = TRUE), .groups = "drop")
+
+# 添加实际年份
+temperature_long_average$year <- years
+
+# 最终结果预览
+head(temperature_long_average)
+
+```
+**现在气候数据已经剪裁完毕了 我们test**
+```{r}
+# 检查是否是每个种群对应 124 年
+table(table(temperature_long_average$population_id))  # 应该大多数是 124
+
+# 检查总行数是否为 8326 * 124
+nrow(temperature_long_average) == 124 * 8326  # 应该为 TRUE
+
+```
+
+**现在开始做数据清洗的最后一个阶段，将整理好的物种数据和气候数据分别转化为id对应数据的long_format,首先是物种数据**
+```{r}
+library(dplyr)
+library(tidyr)
+
+# 转为长格式
+population_long <- selected_pop %>%
+  select(ID, geometry, starts_with("X")) %>%
+  pivot_longer(
+    cols = starts_with("X"),
+    names_to = "year",
+    names_prefix = "X",
+    values_to = "abundance"
+  ) %>%
+  mutate(year = as.integer(year)) %>%
+  rename(population_id = ID)
+
+# 检查结果
+head(population_long)
+
+```
+*去除一下物种数据中连续非十年以上的部分变成NA*
+
+
+
+```{r}
+library(dplyr)
+library(data.table)
+
+# 用 data.table 更高效处理连续段落
+population_filtered <- population_long %>%
+  arrange(population_id, year) %>%
+  as.data.table()
+
+# 标记连续非NA段
+population_filtered[, run_id := rleid(!is.na(abundance)), by = population_id]
+
+# 统计每段长度，并过滤长度小于10的非NA段
+population_filtered[, run_length := .N, by = .(population_id, run_id)]
+
+# 若段落小于10 且 abundance 非NA → 设为 NA
+population_filtered[
+  run_length < 10 & !is.na(abundance),
+  abundance := NA_real_
+]
+
+# 去掉辅助列，恢复为 tibble
+population_filtered <- as_tibble(population_filtered[, .(population_id, geometry, year, abundance)])
+
+```
+*test*
+```{r}
+check_consecutive <- population_filtered %>%
+  group_by(population_id) %>%
+  summarise(
+    max_non_na_run = {
+      r <- rle(!is.na(abundance))
+      max(ifelse(r$values, r$lengths, 0))
+    }
+  ) %>%
+  arrange(max_non_na_run)
+
+head(check_consecutive)
+
+
+```
+
+*第一步先准备好物种数据   population_cleaned*
+```{r}
+# 第一步：去除 abundance 为 NA 的行
+population_clean <- population_filtered %>%
+  filter(!is.na(abundance))
+```
+*检查一下数据，判断一下一个id是否有多段连续超过十年的数据*
+```{r}
+length(unique(population_clean$population_id))
+
+
+# 标记每段连续年份
+population_check <- population_clean %>%
+  select(population_id, year) %>%
+  arrange(population_id, year) %>%
+  group_by(population_id) %>%
+  mutate(gap = year - lag(year, default = first(year) - 1),
+         group = cumsum(gap != 1)) %>%
+  group_by(population_id, group) %>%
+  summarise(segment_length = n(), .groups = "drop") %>%
+  group_by(population_id) %>%
+  summarise(n_segments_over10 = sum(segment_length >= 10), .groups = "drop") %>%
+  filter(n_segments_over10 >= 2)  # 有两段或以上连续10年以上的
+
+# 查看这些异常的 ID
+population_check
+nrow(population_check)
+```
+*check后我们发现在population_clean中有162个id是有超过两段连续十年的数据的，这里我们先只保留第一段连续十年的数据*
+**将清理后的数据保存为population_clean_reduced**
+```{r}
+pop_segments <- population_clean %>%
+  select(population_id, year) %>%
+  arrange(population_id, year) %>%
+  group_by(population_id) %>%
+  mutate(
+    gap = year - lag(year, default = first(year) - 1),
+    segment = cumsum(gap != 1)
+  ) %>%
+  group_by(population_id, segment) %>%
+  mutate(segment_length = n()) %>%
+  ungroup()
+
+# 找出每个 population_id 第一段 ≥10 年的 segment 值
+first_long_segments <- pop_segments %>%
+  filter(segment_length >= 10) %>%
+  group_by(population_id) %>%
+  slice_min(year, with_ties = FALSE) %>%
+  select(population_id, segment)
+
+# 保留 population_clean 中对应 segment 的数据
+population_clean_reduced <- pop_segments %>%
+  inner_join(first_long_segments, by = c("population_id", "segment")) %>%
+  select(population_id, year) %>%
+  inner_join(population_clean, by = c("population_id", "year"))
+
+# ✅ 验证是否每个 population_id 只剩下一个长区段
+check_segments_final <- population_clean_reduced %>%
+  arrange(population_id, year) %>%
+  group_by(population_id) %>%
+  mutate(gap = year - lag(year, default = first(year) - 1),
+         segment = cumsum(gap != 1)) %>%
+  group_by(population_id, segment) %>%
+  summarise(n = n(), .groups = "drop") %>%
+  count(population_id)
+
+# 输出验证：是否每个 population_id 只有一段
+table(check_segments_final$n)
+```
+**再次验证已经处理完毕** 
+*目前物种数据已经处理完毕，储存为population_clean_reduced*
+```{r}
+length(unique(population_clean_reduced$population_id))
+
+
+# 标记每段连续年份
+population_check2 <- population_clean_reduced %>%
+  select(population_id, year) %>%
+  arrange(population_id, year) %>%
+  group_by(population_id) %>%
+  mutate(gap = year - lag(year, default = first(year) - 1),
+         group = cumsum(gap != 1)) %>%
+  group_by(population_id, group) %>%
+  summarise(segment_length = n(), .groups = "drop") %>%
+  group_by(population_id) %>%
+  summarise(n_segments_over10 = sum(segment_length >= 10), .groups = "drop") %>%
+  filter(n_segments_over10 >= 2)  # 有两段或以上连续10年以上的
+
+# 查看这些异常的 ID
+population_check2
+nrow(population_check2)
+```
+**下面开始根据popul*ation_clean_reduced的起止年份-20来裁剪气候数据temperature_long_average**
+*得到了气候数据temperature_trimmed_final*
+```{r}
+
+# 第一步：确定每个 population_id 的起止年份
+pop_years <- population_clean_reduced %>%
+  group_by(population_id) %>%
+  summarise(
+    year_start = min(year),
+    year_end = max(year),
+    .groups = "drop"
+  ) %>%
+  mutate(climate_start = year_start - 20)
+
+# 第二步：合并并裁剪气候数据
+temperature_trimmed_final <- temperature_long_average %>%
+  left_join(pop_years, by = "population_id") %>%
+  filter(year >= climate_start & year <= year_end) %>%
+  select(population_id, year, mean_temperature)
+
+# ✅ 第三步：验证每个 id 起止年份是否正确
+verify_trimmed <- temperature_trimmed_final %>%
+  group_by(population_id) %>%
+  summarise(
+    min_year = min(year),
+    max_year = max(year),
+    .groups = "drop"
+  ) %>%
+  left_join(pop_years, by = "population_id") %>%
+  mutate(
+    check_start = min_year == climate_start,
+    check_end = max_year == year_end
+  )
+
+# 输出检查是否全部为 TRUE
+table(verify_trimmed$check_start, verify_trimmed$check_end)
+```
+*简单验证一下物种数据和气候数据的行数*
+*ok没问题物种数据和气候数据都搞定了*
+```{r}
+nrow(temperature_trimmed_final)
+nrow(population_clean_reduced)
+nrow(temperature_trimmed_final)==nrow(population_clean_reduced)+8326*20
+```
+*为了方便下一步建模，我们将挑选300个id（从之前按照斜率划分的三个组合selected_pop_labeled）*
+```{r}
+set.seed(12)  # 保证可重复
+
+# 从三个趋势中各抽100个 population ID
+sampled_idid <- selected_pop_labeled %>%
+  st_drop_geometry() %>%                 # 如果是 sf 对象，先去除 geometry
+  group_by(Trend) %>%
+  slice_sample(n = 100) %>%
+  ungroup() %>%
+  select(ID, Trend)
+# 查看前几行
+head(sampled_idid)
+tail(sampled_idid)
+```
+
+
+
+
+*下面开始生成最终的物种样本数据*
+```{r}
+# 直接筛选
+population_final <- population_clean_reduced %>%
+  filter(population_id %in% sampled_idid$ID)
+
+# 加 trend 信息（match 方法更快更直观）
+population_final$Trend <- sampled_idid$Trend[match(population_final$population_id, sampled_idid$ID)]
+
+# 重新排序列
+population_final <- population_final %>%
+  select(population_id, year, abundance, Trend, geometry)
+
+head(population_final)
+tail(population_final)
+nrow(population_final)
+```
+
+*气候数据*
+```{r}
+# 同理筛选 + 匹配 trend
+temperature_final <- temperature_trimmed_final %>%
+  filter(population_id %in% sampled_idid$ID)
+
+temperature_final$Trend <- sampled_idid$Trend[match(temperature_final$population_id, sampled_idid$ID)]
+
+temperature_final <- temperature_final %>%
+  select(population_id, year, mean_temperature, Trend)
+
+head(temperature_final)
+tail(temperature_final)
+nrow(temperature_final)
+```
+*最后检查无误*
+```{r}
+nrow(temperature_final)==nrow(population_final)+6000
+```
+**save as .csv files**
+```{r}
+# 保存物种数据为 CSV
+write.csv(population_final, file = "population_final.csv", row.names = FALSE)
+
+# 保存气候数据为 CSV
+write.csv(temperature_final, file = "temperature_final.csv", row.names = FALSE)
+
+```
+
+
+
+
+
+
+
+
+
+
+
+
+
+
